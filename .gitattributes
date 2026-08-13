@@ -1,0 +1,8 @@
+# An .xlsx is a zip. Git must never try to diff it or "fix" its line endings --
+# either would corrupt the package.
+*.xlsx binary
+*.png  binary
+
+# The LAMBDA source is plain text, but it is Excel formula syntax and is meant
+# to round-trip byte-for-byte with the gist. Leave its line endings alone.
+*.txt -text

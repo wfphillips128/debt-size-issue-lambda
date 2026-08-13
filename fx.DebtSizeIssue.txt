@@ -1,0 +1,504 @@
+/* ==========================================================================
+   fx.DebtSizeIssueλ                    Advanced Formula Environment source
+   --------------------------------------------------------------------------
+   Sizes a brand-new serial debt issuance. Par is an OUTPUT, not an input:
+   each period's maturity is sized to the coverage test, and the tranches so
+   created are what generate interest.
+
+   Covers steps 1-5 of the Project work list:
+     1) no opening balance needed
+     2) DBTRSVPCT / DBTRSVRATE live - reserve sized off MAXIMUM ANNUAL debt
+        service and its earnings credited against debt service
+     3) no initial debt balance required
+     4) a coupon CURVE - a different rate on each tranche (taxable case)
+     5) par-value rounding at $1, $1,000 or $5,000
+
+   COUPON IS A PER-TRANCHE RATE.
+   COUPON(y) is the coupon on the tranche MATURING in year y - not "the rate
+   applied to the balance in year y". Interest owed in any year is the sum of
+   the coupons on every tranche still outstanding, which includes maturities
+   far beyond that year. When every coupon is identical the two readings are
+   algebraically the same, which is why a flat 5% never exposes the difference.
+   With a rising coupon curve, balance-times-one-rate is wrong by a material
+   amount every year, and it changes sign - overstating the early years and
+   understating the late ones.
+
+   So this function does not derive interest from the balance. It carries the
+   REMAINING ANNUAL COUPON and retires each tranche's coupon as that tranche
+   matures:
+
+       Interest(y)  = CoupRem(y) * MONTHS(y) / 12
+       Principal(y) = FLOOR(MAX(0, CFADS(y)/DSCR(y) - Interest(y) + Credit(y)),
+                            ParValueIncr(y))
+       CoupRem(y+1) = CoupRem(y) - Principal(y) * COUPON(y)
+
+   THE PAYOFF DATE IS A HARD CONSTRAINT, NOT A COLUMN COUNT.
+   The tranche ladder is generated off the delivery date and runs a fixed
+   number of columns wide. The date the issue must be retired by does not
+   move with it. Push the delivery date out and the far end of the ladder
+   walks past the payoff date, so the columns handed to this function stop
+   being all-live: the last few are tranches that may not legally exist.
+
+   Two things then go wrong if the function just trusts its column count.
+   It sizes maturities into those dead columns; and - the larger error - it
+   releases the debt service reserve at Idx = Periods, the last column passed,
+   rather than at the last LIVE maturity. The release is what funds the big
+   final tranche. Stranded in a dead column it funds nothing, the reserve
+   itself is sized off the wrong maximum annual debt service, and the whole
+   issue is mis-sized. Worse, if a dead column carries no revenue at all the
+   release is the only cash in it, so the function invents a maturity there
+   with negative coverage.
+
+   MATURITY and LastPayoffDate close that. Live = MATURITY <= LastPayoffDate;
+   principal is sized only where Live, reserve earnings accrue only where Live,
+   and the reserve is released at the last live period. Omit both and the
+   function falls back to "live wherever CFADS is positive", which reproduces
+   the previous behaviour exactly when every column carries revenue.
+
+   SOLVER NOTE.
+   The Lance Rubin pattern (feed the previous iteration's payment forward) is
+   fixed-point iteration. It converges when the opening balance is GIVEN. Once
+   the issue size is unknown it diverges: raising the balance raises interest,
+   which cuts principal by more than the balance rose. Verified - 200
+   iterations, no convergence. This function bisects instead, on TOTAL ANNUAL
+   COUPON, which is unconditionally stable because the residual is monotonic.
+
+   WHICH SIDE OF THE BRACKET YOU STOP ON IS A FEASIBILITY QUESTION.
+   Par rounding means the residual never reaches zero, so the bisection ends
+   straddling the answer rather than on it. The two sides are not equally
+   valid. The low side sizes every maturity assuming less interest than the
+   issue really carries, which puts par one increment too high and lands
+   coverage just under the test - 1.09999x against a 1.10 covenant, invisible
+   behind a one-decimal display. The high side assumes slightly more interest
+   than the issue carries and is feasible in every period. So the terminal
+   step rebuilds on the HIGH bracket, never on the last probe.
+
+   THE CEILING HAS TO BE A REAL CEILING - AND REVENUE ALONE IS NOT ONE.
+   Everything above depends on HiB genuinely bracketing the answer from
+   above. The first ceiling used here was total live revenue over the
+   coverage ratio, times the highest coupon - i.e. "par can never exceed the
+   revenue that services it". That is false. Revenue is not the only thing
+   that funds principal: the debt service reserve is RELEASED at the last
+   live period and funds principal too. On a long ladder the release is
+   small next to nine years of revenue and the bound holds by accident. On a
+   SHORT ladder - a late delivery date leaving two or three live tranches -
+   the release is a quarter of the whole issue, par exceeds revenue/DSCR,
+   and the true answer sits ABOVE the ceiling. The bisection then never
+   brackets it, pins at its own ceiling for all 50 steps, and returns an
+   under-sized issue that quietly breaches the covenant.
+
+   Worse, the pinned trial coupon is BELOW the coupon the maturities really
+   carry, so CoupRem runs NEGATIVE once the last live tranche retires. A
+   negative remaining coupon is a negative Intr, and Raw = -Intr is then
+   POSITIVE in exactly the columns that are supposed to be dead: the
+   function issues bonds maturing years past the payoff date. Observed with
+   a flat coupon and a delivery date late enough to leave two live tranches
+   - several percent of par maturing up to seven years past the payoff date,
+   and coverage more than 100bp under the covenant. It fails quietly: par,
+   sources and uses all still tie, because the schedule is internally
+   consistent. Only the coverage row and the maturity dates give it away.
+
+   Two changes close it, and they are independent:
+     - HiB is now GROWN until its residual is actually negative. Step opens
+       at -12 instead of 1, and while it is negative the recursion probes the
+       ceiling and doubles it rather than bisecting - 4096x of headroom
+       against an observed worst case of 1.09x. This reuses the recursion
+       that already exists rather than adding a nested REDUCE, which would
+       have stacked three iterator-LAMBDAs (REDUCE over Solveλ's own REDUCE
+       over CoupRemλ's SCAN) and costs two extra levels, not 144 extra
+       Partsλ evaluations. A seed that was already valid passes on the first
+       probe, so every previously-correct answer is bit-identical.
+     - Principal is multiplied by Live in BOTH CoupRemλ and Partsλ, so a
+       dead column can never be sized whatever the sign of Intr. This is
+       belt-and-braces once the ceiling is right, but it makes the invariant
+       explicit rather than emergent.
+
+   STORED LENGTH IS A HARD CONSTRAINT AT 8192 CHARACTERS.
+   Excel caps a single formula at 8192 characters, and it measures the form
+   it STORES, not the text you paste. Storage adds a prefix to every name:
+   _xlfn. on post-2007 functions, _xlpm. on lambda parameters and LET names,
+   _xlop. on optional lambda parameters, _xlws. on worksheet-only functions
+   such as FILTER. On this function those prefixes alone are about 1950
+   characters, so a 6200-character paste is stored at over 8100. Over the
+   limit, .xlsx saves warn and Name Manager refuses the paste outright.
+
+   Two consequences worth knowing before editing this:
+
+     - A RECURSIVE CALL IS THE MOST EXPENSIVE THING IN HERE. Twelve
+       arguments, every one prefixed, is 185 stored characters per call
+       site. That is why the four branches of the solver are written as
+       three expressions (NxtLo / NxtHi / NxtIt) feeding ONE call, rather
+       than as four calls. It reads worse and it is not optional.
+
+     - THE HELP TABLE IS THE LARGEST SINGLE BLOCK. String literals are the
+       one part with no prefix overhead but they are counted in full. Long
+       prose belongs in these comments, which AFE strips on import and which
+       therefore cost nothing at all.
+
+   If this ever does need to exceed 8192, saving the workbook as .xlsb
+   (Excel Binary Workbook) lifts the limit - that is what the save-time
+   warning is offering. Prefer shortening.
+
+   A FLAT COUPON IS THE HARD CASE HERE, NOT THE EASY ONE.
+   Only the flat-coupon issue ever showed this, and that is not luck. The
+   ceiling uses MAX(COUPON) across ALL columns including the dead ones, and
+   on a normal rising curve the dead far-end tranches carry the highest
+   coupons on the curve - which inflates the ceiling by enough to bracket
+   the answer by accident. A flat curve has no such slack, so the ceiling
+   degenerates to exactly par-times-coupon with nothing spare. Test a
+   coupon-curve function on a FLAT curve as well as a rising one; the flat
+   case is where a bad bound has nowhere to hide.
+
+   ========================================================================== */
+
+/* FUNCTION NAME: fx.DebtSizeIssueλ
+   DESCRIPTION:*//**Sizes a new serial issuance to a coverage test, with a per-tranche coupon curve, a MADS-based debt service reserve and a hard payoff date*/
+/* REVISIONS: Date         Developer   Description
+              Aug 07 2026  W Phillips  Initial release
+              Aug 07 2026  W Phillips  Per-tranche coupons - interest is now
+                                       carried as remaining annual coupon
+                                       rather than derived from the balance
+              Aug 09 2026  W Phillips  Renamed BXLDebt.SizeIssuanceλ to
+                                       fx.DebtSizeIssueλ
+              Aug 10 2026  W Phillips  MATURITY / LastPayoffDate added. Maturities
+                                       past the payoff date are no longer sized,
+                                       and the reserve is released at the last
+                                       LIVE period, not the last column passed
+              Aug 10 2026  W Phillips  Terminal step now rebuilds on the HIGH
+                                       bisection bracket rather than the last
+                                       probe. The last probe could land on the
+                                       low side, which oversizes par by one
+                                       increment and breaches the coverage test
+              Aug 10 2026  W Phillips  The bisection ceiling is now GROWN until
+                                       it actually brackets the answer. Live
+                                       revenue / DSCR x max coupon is NOT an
+                                       upper bound - the reserve release funds
+                                       principal too, and on a short ladder par
+                                       exceeds it. Step opens at -12 and the
+                                       recursion doubles the ceiling until its
+                                       residual goes negative. Principal is also
+                                       Live-gated in CoupRemλ and Partsλ so a
+                                       dead column cannot be sized even if Intr
+                                       goes negative
+              Aug 11 2026  W Phillips  Stored form was over Excel's 8192-char
+                                       formula limit, which is why Name Manager
+                                       refused the paste and .xlsx saves warned.
+                                       The four solver branches now feed ONE
+                                       recursive call via NxtLo / NxtHi / NxtIt,
+                                       and the help table was tightened. No
+                                       change to any number the function returns
+*/
+fx.DebtSizeIssueλ = LAMBDA(
+    // ---- User arguments (all bracketed so the help table can display) ----
+    [CFADS],          // Required. Cash flow available for debt service, per period
+    [DSCR],           // Required. Debt service coverage ratio, per period
+    [COUPON],         // Required. Coupon on the tranche MATURING in each period
+    [DBTRSVPCT],      // Required. Reserve as a % of maximum annual debt service
+    [DBTRSVRATE],     // Required. Earnings rate credited on the reserve
+    [ParValueIncr],   // Required. Par rounding increment. Use 1 for none - never 0
+    [MONTHS],         // Required. Months of interest accruing in each period
+    [MATURITY],       // Optional. Maturity date of each period's tranche
+    [LastPayoffDate], // Optional. Last date a maturity may fall on
+    // ---- Internal state. Never passed by the user. ----
+    [Lo],             // Bisection bracket, low
+    [Hi],             // Bisection bracket, high
+    [Iter],           // Bisection depth counter
+
+    LET(
+        // The help table is the single largest block of stored characters in
+        // this function - see the STORED LENGTH note in the header. Keep it
+        // terse. The long-form explanation belongs in these comments, which
+        // cost nothing because AFE strips them on import.
+        Help, TRIM(TEXTSPLIT(
+            "DESCRIPTION:       →Sizes a new serial debt issuance to a coverage test¶" &
+            "                   →Par is an OUTPUT - the sum of the sized maturities¶" &
+            "SUGGESTED ROW IDS: →Debt opening balance / Interest / Principal repaid /¶" &
+            "                   →Debt closing balance / Debt service / Reserve credit /¶" &
+            "                   →Net debt service¶" &
+            "VERSION:           →W Phillips, Aug-11-2026¶" &
+            "PARAMETERS:→¶" &
+            "CFADS              →(Required) Cash available for debt service, per period¶" &
+            "DSCR               →(Required) Debt service coverage ratio, per period¶" &
+            "COUPON             →(Required) Coupon on the tranche MATURING in each period¶" &
+            "→ - a curve, not one rate on the balance. Flat is fine.¶" &
+            "DBTRSVPCT          →(Required) Reserve as a % of MAXIMUM ANNUAL debt service¶" &
+            "→ 25% is a 3-of-12-months reserve. The largest is used.¶" &
+            "DBTRSVRATE         →(Required) Earnings rate credited on the reserve¶" &
+            "ParValueIncr       →(Required) Par rounding increment. 1 = none. Never 0.¶" &
+            "MONTHS             →(Required) Months of interest per period, eg. 10,12,12¶" &
+            "MATURITY           →(Optional) Maturity date of each period's tranche¶" &
+            "LastPayoffDate     →(Optional) Last date a maturity may fall on. Periods¶" &
+            "→ after it are not sized; the reserve releases at the last live one.¶" &
+            "Lo, Hi, Iter       →Internal - the bisection solver's state¶" &
+            "→¶" &
+            "EXAMPLE:           →=fx.DebtSizeIssueλ(M59#,M60#,M61#,M62#,M63#,M64#,M65#,M58#,PayoffDate)",
+            "→", "¶")),
+
+        ErrMsgs, {
+            "CFADS must be a dynamic array holding cash available for debt service in each period";
+            "DSCR must be a dynamic array holding the debt service coverage ratio for each period";
+            "COUPON must be a dynamic array holding the coupon on the tranche maturing in each period";
+            "DBTRSVPCT must be a dynamic array holding the reserve percentage for each period";
+            "DBTRSVRATE must be a dynamic array holding the reserve earnings rate for each period";
+            "ParValueIncr must be a dynamic array of par increments, every one greater than zero. Use 1 for no rounding";
+            "MONTHS must be a dynamic array holding the months of interest accruing in each period";
+            "MATURITY must be a dynamic array of maturity dates, the same width as CFADS"
+        },
+
+        // ---- Validate. The recursion passes these arrays through unchanged, so
+        //      a recursive call never trips its own validation.
+        CFADS,        IF(COLUMNS(CFADS) <= 1, #VALUE!, CFADS),
+        DSCR,         IF(COLUMNS(DSCR) <= 1, #VALUE!, DSCR),
+        COUPON,       IF(COLUMNS(COUPON) <= 1, #VALUE!, COUPON),
+        DBTRSVPCT,    IF(COLUMNS(DBTRSVPCT) <= 1, #VALUE!, DBTRSVPCT),
+        DBTRSVRATE,   IF(COLUMNS(DBTRSVRATE) <= 1, #VALUE!, DBTRSVRATE),
+        ParValueIncr, IF(OR(COLUMNS(ParValueIncr) <= 1, MIN(ParValueIncr) <= 0), #VALUE!, ParValueIncr),
+        MONTHS,       IF(COLUMNS(MONTHS) <= 1, #VALUE!, MONTHS),
+
+        // ---- Resolve the payoff gate into two concrete values, so the recursive
+        //      call can pass them positionally. ISOMITTED cannot be forwarded.
+        //
+        //      Supplied: Mat is the date row, Pay is LastPayoffDate, and Live
+        //                is MATURITY <= LastPayoffDate as you would expect.
+        //      Omitted:  Mat becomes --(CFADS <= 0) - 0 where there IS revenue -
+        //                and Pay becomes 0, so Live is Mat <= 0, ie. revenue is
+        //                positive. Both forms are idempotent: re-resolving Mat
+        //                and Pay on the way down the recursion returns them
+        //                unchanged, so every level sees the same mask.
+        Mat,  IF(ISOMITTED(MATURITY), --(CFADS <= 0),
+                 IF(COLUMNS(MATURITY) <> COLUMNS(CFADS), #VALUE!, MATURITY)),
+        Pay,  IF(ISOMITTED(MATURITY), 0,
+                 IF(ISOMITTED(LastPayoffDate), MAX(Mat), LastPayoffDate)),
+
+        Errors, VSTACK(OR(ISERROR(CFADS)), OR(ISERROR(DSCR)), OR(ISERROR(COUPON)),
+                       OR(ISERROR(DBTRSVPCT)), OR(ISERROR(DBTRSVRATE)),
+                       OR(ISERROR(ParValueIncr)), OR(ISERROR(MONTHS)),
+                       OR(ISERROR(Mat))),
+        Messages, FILTER(ErrMsgs, Errors, ""),
+
+        Periods, COLUMNS(CFADS),
+        Idx,     SEQUENCE(1, Periods),
+        RsvPct,  MAX(DBTRSVPCT),
+
+        // ---- The payoff gate. Maturities ascend, so Live is a prefix mask and
+        //      LastLive is simply its right-hand edge. All-dead gives 0, which
+        //      matches no Idx, so nothing is released - which is correct, since
+        //      an all-dead schedule sizes no debt and needs no reserve.
+        Live,     --(Mat <= Pay),
+        LastLive, MAX(Live * Idx),
+
+        // ---- Reserve earnings credited in each LIVE period, plus the release of
+        //      the balance itself at the last live period.
+        Creditλ, LAMBDA(res,
+            res * DBTRSVRATE * MONTHS / 12 * Live + res * (Idx = LastLive)),
+
+        // ---- One forward pass, carrying the REMAINING ANNUAL COUPON. SCAN does
+        //      the carry, so there is no recursion here. Each period sizes its
+        //      maturity to the coverage test, then retires that tranche's coupon.
+        //      Returns the coupon still outstanding AFTER each period.
+        //
+        //      Princ is multiplied by Live, not just Target. Gating Target alone
+        //      leaves Target - Intr = -Intr in a dead column, which is POSITIVE
+        //      whenever rem has gone negative, and mints a maturity there.
+        CoupRemλ, LAMBDA(tc, res,
+            LET(
+                Cr, Creditλ(res),
+                SCAN(tc, Idx, LAMBDA(rem, y,
+                    LET(
+                        Target, INDEX(CFADS, 1, y) / INDEX(DSCR, 1, y) * INDEX(Live, 1, y),
+                        Intr,   rem * INDEX(MONTHS, 1, y) / 12,
+                        Princ,  FLOOR(MAX(0, Target - Intr + INDEX(Cr, 1, y))
+                                      * INDEX(Live, 1, y),
+                                      INDEX(ParValueIncr, 1, y)),
+                        rem - Princ * INDEX(COUPON, 1, y)
+                    )))
+            )),
+
+        // ---- Principal and interest for a trial total coupon and reserve.
+        //      MAX() would collapse an array to a scalar, so the floor at zero
+        //      is written elementwise with IF(). Prin carries the same Live gate
+        //      as CoupRemλ - the two must agree period for period.
+        Partsλ, LAMBDA(tc, res,
+            LET(
+                Aft,  CoupRemλ(tc, res),
+                Bef,  HSTACK(tc, DROP(Aft, , -1)),
+                Intr, Bef * MONTHS / 12,
+                Raw,  CFADS / DSCR * Live - Intr + Creditλ(res),
+                Prin, FLOOR(IF(Raw < 0, 0, Raw) * Live, ParValueIncr),
+                VSTACK(Prin, Intr)
+            )),
+
+        // ---- Terminal step. The issue actually sold carries the coupon implied
+        //      by the maturities themselves, which the bisection probe only
+        //      approaches - par rounding stops the residual reaching zero.
+        //      Rebuild balances and interest on the true coupon, holding the
+        //      maturities fixed, or every interest figure comes out overstated.
+        //      Names avoid a trailing digit: Cl2, Op2, In2, Rsv2 and Cr2 are all
+        //      valid cell addresses, and Excel rejects the whole binding list
+        //      when a LET name looks like a reference.
+        Finalλ, LAMBDA(parts,
+            LET(
+                Prin,   INDEX(parts, 1, 0),
+                TrueTC, SUM(Prin * COUPON),
+                Par,    SUM(Prin),
+                Cum,    SCAN(0, Idx, LAMBDA(a, y, a + INDEX(Prin, 1, y))),
+                ClEnd,  Par - Cum,
+                OpEnd,  HSTACK(Par, DROP(ClEnd, , -1)),
+                CumC,   SCAN(0, Idx, LAMBDA(a, y,
+                            a + INDEX(Prin, 1, y) * INDEX(COUPON, 1, y))),
+                RemBef, TrueTC - HSTACK(0, DROP(CumC, , -1)),
+                IntEnd, RemBef * MONTHS / 12,
+                RsvEnd, MAX(Prin + IntEnd) * RsvPct,
+                CrEnd,  Creditλ(RsvEnd),
+                VSTACK(OpEnd, IntEnd, -Prin, ClEnd, Prin + IntEnd,
+                       -CrEnd, Prin + IntEnd - CrEnd)
+            )),
+
+        // ---- Bisection state. Omitted on the outer call. The bracket is on
+        //      TOTAL ANNUAL COUPON, and HiB opens on live revenue over the
+        //      coverage ratio times the highest coupon. That is a good GUESS
+        //      and a bad BOUND, so Step opens NEGATIVE: a negative Step means
+        //      "the ceiling has not been proved yet". See the Result block.
+        LoB,  IF(ISOMITTED(Lo),   0,                                            Lo),
+        HiB,  IF(ISOMITTED(Hi),   SUM(CFADS * Live) / MIN(DSCR) * MAX(COUPON),  Hi),
+        Step, IF(ISOMITTED(Iter), -12,                                          Iter),
+        Mid,  (LoB + HiB) / 2,
+
+        // ---- Size the whole schedule at one trial total coupon. The reserve is
+        //      sized off MAXIMUM ANNUAL debt service, which the reserve itself
+        //      helps determine, so it is settled with REDUCE - not recursion,
+        //      which keeps the bisection below the only recursion here.
+        Solveλ, LAMBDA(tc,
+            LET(Rsv, REDUCE(0, SEQUENCE(1, 12), LAMBDA(r, ignore,
+                         LET(P, Partsλ(tc, r),
+                             MAX(INDEX(P, 1, 0) + INDEX(P, 2, 0)) * RsvPct))),
+                Partsλ(tc, Rsv))),
+
+        // While the ceiling is unproved, probe the CEILING; once proved, probe
+        // the midpoint as an ordinary bisection does.
+        Grow,     Step < 0,
+        Probe,    IF(Grow, HiB, Mid),
+        Parts,    Solveλ(Probe),
+        // The coupon the sized maturities actually create, against the trial.
+        Residual, SUM(INDEX(Parts, 1, 0) * COUPON) - Probe,
+        // Up = the answer is at or above the probe. In the GROW phase that
+        // means the ceiling is still too low; in the BISECT phase it means
+        // the lower half can be discarded. Same test, two readings.
+        Up,       Residual >= 0,
+
+        // ---- The next bracket, as three expressions rather than four call
+        //      sites. This is not style: a recursive call costs 185 stored
+        //      characters against a hard 8192 limit (see the header), and
+        //      writing the four branches out longhand does not fit.
+        //
+        //        Grow &  Up   ceiling too low      -> Lo,  Hi*2, Step+1
+        //        Grow & !Up   ceiling proved       -> Lo,  Hi,   1
+        //        Bis  &  Up   answer in upper half -> Mid, Hi,   Step+1
+        //        Bis  & !Up   answer in lower half -> Lo,  Mid,  Step+1
+        NxtLo,    IF(Up, IF(Grow, LoB, Mid), LoB),
+        NxtHi,    IF(Up, IF(Grow, HiB * 2, HiB), IF(Grow, HiB, Mid)),
+        NxtIt,    IF(Up, Step + 1, IF(Grow, 1, Step + 1)),
+
+        // ---- Bisect. Residual is monotonically decreasing in the trial coupon,
+        //      so a non-negative residual means the answer is at or above Mid.
+        //      Mat and Pay go down resolved, never as ISOMITTED.
+        //
+        //      TERMINATE ON HiB, NOT ON Mid. This is not tidying - it decides
+        //      whether the schedule returned actually passes its own coverage
+        //      test. Sizing uses the interest implied by the TRIAL coupon;
+        //      Finalλ rebuilds interest on the coupon the maturities really
+        //      create. Par rounding stops those two ever meeting, so the sign
+        //      of Residual at the point we stop is what matters:
+        //
+        //        Residual > 0  true interest EXCEEDS what sizing assumed, so
+        //                      every maturity was sized a notch too generously
+        //                      and coverage comes in BELOW the test
+        //        Residual < 0  true interest is BELOW what sizing assumed, so
+        //                      the schedule is conservative and coverage holds
+        //
+        //      HiB only ever takes a value whose Residual was negative - which
+        //      the GROW phase below now makes true of the opening ceiling as
+        //      well. That was the missing half: this whole argument is only
+        //      sound while HiB really is an upper bound, and a ceiling that
+        //      never brackets leaves the bisection pinned on it for all 50
+        //      steps with Residual > 0 - the breaching case, dressed as the
+        //      safe one. LoB is the opposite invariant and is reliably one par
+        //      increment too large. Mid is whichever side the 50th probe fell
+        //      on - a coin toss decided in the 15th significant digit, which is
+        //      why the same workbook could pass on one machine and breach on
+        //      another. Verified: on the benchmark issue, LoB breaches at
+        //      1.09999x against a 1.10 test while HiB clears it.
+        //
+        //      PHASE 1, Step < 0 - GROW. Probe is HiB itself. A negative
+        //      residual proves HiB is above the answer, so hand the bracket
+        //      straight to the bisection at Step 1; otherwise double the
+        //      ceiling and come back. Twelve attempts is 4096x headroom
+        //      against an observed worst case of 1.09x, and a seed that was
+        //      already valid passes through on the first probe - which is why
+        //      every previously-correct answer is unchanged to the cent.
+        //
+        //      PHASE 2, Step >= 0 - BISECT, exactly as before. Step < 0 can
+        //      never satisfy Step >= 50, so the order of these tests is safe.
+        Result, IF(Step >= 50,
+                   Finalλ(Solveλ(HiB)),
+                   fx.DebtSizeIssueλ(CFADS, DSCR, COUPON, DBTRSVPCT, DBTRSVRATE,
+                                     ParValueIncr, MONTHS, Mat, Pay, NxtLo, NxtHi, NxtIt)),
+
+        Return, IF(AND(Errors), 2, IF(OR(Errors), 3, IF(OR(ISERROR(Result)), 2, 1))),
+        CHOOSE(Return, Result, Help, Messages)
+    )
+);
+
+/* ==========================================================================
+   OUTPUT ROWS
+     1  Debt opening balance
+     2  Interest on principal balance
+     3  Principal repayments        (negative)
+     4  Debt closing balance
+     5  Debt service                (principal + interest)
+     6  Debt reserve credit         (negative - reduces debt service)
+     7  Net debt service            (row 5 + row 6)
+
+   The output is always as wide as CFADS. Periods past the payoff date come
+   back as zeros rather than being dropped, so the grid keeps its one-column-
+   per-tranche mapping and no formula has to be re-pointed when the delivery
+   date moves.
+
+   HOW TO CALL IT
+     One input block, one row per argument, all the same width. With the
+     tranche maturity dates on the first row of the block and the payoff
+     date in a single cell:
+
+       =fx.DebtSizeIssueλ(CFADSrow, DSCRrow, COUPONrow, DBTRSVPCTrow,
+                          DBTRSVRATErow, ParValueIncrRow, MONTHSrow,
+                          MATURITYrow, PayoffDate)
+
+     The MATURITY row is the same tranche ladder the grid matches its
+     revenue against. Total par is not an argument - read it off row 1
+     column 1 of the result, or as -SUM(row 3).
+
+   WHY THE PAYOFF DATE MATTERS EVEN THOUGH PAR IS AN OUTPUT
+     Because the reserve release is what funds the final maturity. Sized off
+     maximum annual debt service, released in full at payoff, it makes the
+     last tranche roughly a third larger than the ones before it. Put that
+     release in the wrong column and two things move at once: the final
+     tranche shrinks to a normal one, and maximum annual debt service - and
+     therefore the reserve, and therefore every reserve credit in every
+     period - is computed off a schedule that never existed.
+
+   FEEDING IT A COUPON CURVE
+     The COUPON row takes one coupon per tranche, not one blended rate: the
+     rate on the maturity falling in each period, left to right. For a single-
+     coupon issue enter the same rate the whole way across - the maths is
+     identical in that case, which is why a flat coupon never exposes a
+     balance-times-one-rate error.
+
+   WHY THE GRID USES W:Y AND THIS FUNCTION DOES NOT
+     In the grid, column X is each tranche's semiannual coupon (par x rate / 2)
+     and column Y sums X from the current row down - the coupons on every
+     tranche maturing on or after that date. That is the same quantity this
+     function carries as CoupRem, just accumulated by lookback instead of by
+     roll-forward. A spilling function cannot look down a column that does not
+     exist yet, so it carries the total forward and retires each tranche's
+     coupon as that tranche matures. Same answer, opposite direction.
+   ========================================================================== */
