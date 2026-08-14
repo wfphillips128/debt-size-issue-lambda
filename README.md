@@ -29,10 +29,8 @@ defined name — open Name Manager (Ctrl+F3) and you will find `fx.DebtSizeIssue
 > invoked with `()`, and the workbook calculates. To read the source properly, use
 > [`fx.DebtSizeIssue.txt`](fx.DebtSizeIssue.txt) or the Advanced Formula Environment.
 >
-> For the same reason, do not try to install this function by pasting into Name
-> Manager. The *Refers to* box will not accept text that long, and the function is
-> recursive — a name cannot reference itself before it exists. Use the gist and AFE,
-> below.
+> Nor can you install this function by pasting into Name Manager: the *Refers to* box
+> will not accept text that long, whatever it contains. Use the gist and AFE, below.
 
 You need a version of Excel with dynamic arrays and LAMBDA: **Microsoft 365** or
 **Excel 2024**. It will not work in Excel 2019 or earlier, and the `λ` in the name means
