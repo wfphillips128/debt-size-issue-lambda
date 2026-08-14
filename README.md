@@ -21,6 +21,19 @@ Download [`Single-Issue-Bonding-Capacity.xlsx`](Single-Issue-Bonding-Capacity.xl
 open it. **No add-in is required.** The function is stored in the workbook itself as a
 defined name — open Name Manager (Ctrl+F3) and you will find `fx.DebtSizeIssueλ` there.
 
+> **Name Manager will draw it wrong, and the function is fine.** Every argument of a 5G
+> LAMBDA is optional, and Excel stores optional parameters with an internal `_xlop.`
+> prefix that the *Refers to* box renders as a bare bracketed list. You will see
+> `=[CFADS] [DSCR] [COUPON] … TRIM(TEXTSPLIT(` — no `LAMBDA(`, no commas. That is a
+> display bug in that one text box, not a corrupted definition; only a LAMBDA can be
+> invoked with `()`, and the workbook calculates. To read the source properly, use
+> [`fx.DebtSizeIssue.txt`](fx.DebtSizeIssue.txt) or the Advanced Formula Environment.
+>
+> For the same reason, do not try to install this function by pasting into Name
+> Manager. The *Refers to* box will not accept text that long, and the function is
+> recursive — a name cannot reference itself before it exists. Use the gist and AFE,
+> below.
+
 You need a version of Excel with dynamic arrays and LAMBDA: **Microsoft 365** or
 **Excel 2024**. It will not work in Excel 2019 or earlier, and the `λ` in the name means
 the workbook must stay in a Unicode-aware Excel rather than a compatibility mode.
