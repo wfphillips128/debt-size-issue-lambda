@@ -187,6 +187,15 @@
                                        recursive call via NxtLo / NxtHi / NxtIt,
                                        and the help table was tightened. No
                                        change to any number the function returns
+              Sep 05 2026  W Phillips  5g compliance. Help now opens with the
+                                       FUNCTION syntax line and carries WEBPAGE
+                                       (Standard 03), and the final LET step is
+                                       the bare name Output rather than the
+                                       CHOOSE expression (Standard 10), which
+                                       lets a maintainer swap in any other step
+                                       name to inspect it. Documentation only -
+                                       no change to any number the function
+                                       returns
 */
 fx.DebtSizeIssueλ = LAMBDA(
     // ---- User arguments (all bracketed so the help table can display) ----
@@ -210,12 +219,16 @@ fx.DebtSizeIssueλ = LAMBDA(
         // terse. The long-form explanation belongs in these comments, which
         // cost nothing because AFE strips them on import.
         Help, TRIM(TEXTSPLIT(
+            "FUNCTION:          →fx.DebtSizeIssueλ(CFADS, DSCR, COUPON, DBTRSVPCT,¶" &
+            "                   →DBTRSVRATE, ParValueIncr, MONTHS, [MATURITY],¶" &
+            "                   →[LastPayoffDate])¶" &
             "DESCRIPTION:       →Sizes a new serial debt issuance to a coverage test¶" &
             "                   →Par is an OUTPUT - the sum of the sized maturities¶" &
+            "WEBPAGE:           →github.com/wfphillips128/debt-size-issue-lambda¶" &
             "SUGGESTED ROW IDS: →Debt opening balance / Interest / Principal repaid /¶" &
             "                   →Debt closing balance / Debt service / Reserve credit /¶" &
             "                   →Net debt service¶" &
-            "VERSION:           →W Phillips, Aug-11-2026¶" &
+            "VERSION:           →W Phillips, Sep-05-2026¶" &
             "PARAMETERS:→¶" &
             "CFADS              →(Required) Cash available for debt service, per period¶" &
             "DSCR               →(Required) Debt service coverage ratio, per period¶" &
@@ -444,8 +457,12 @@ fx.DebtSizeIssueλ = LAMBDA(
                    fx.DebtSizeIssueλ(CFADS, DSCR, COUPON, DBTRSVPCT, DBTRSVRATE,
                                      ParValueIncr, MONTHS, Mat, Pay, NxtLo, NxtHi, NxtIt)),
 
+        // 5g Standard 10: the last LET step is a bare NAME, not the expression.
+        // Swap Output for Parts, Live, Residual or any other step to see that
+        // step's value in the grid - which is the whole point of the rule.
         Return, IF(AND(Errors), 2, IF(OR(Errors), 3, IF(OR(ISERROR(Result)), 2, 1))),
-        CHOOSE(Return, Result, Help, Messages)
+        Output, CHOOSE(Return, Result, Help, Messages),
+        Output
     )
 );
 
