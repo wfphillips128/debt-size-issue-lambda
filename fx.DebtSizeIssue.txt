@@ -158,7 +158,7 @@
               Aug 07 2026  W Phillips  Per-tranche coupons - interest is now
                                        carried as remaining annual coupon
                                        rather than derived from the balance
-              Aug 09 2026  W Phillips  Renamed BXLDebt.SizeIssuanceλ to
+              Aug 09 2026  W Phillips  Renamed from its original working name to
                                        fx.DebtSizeIssueλ
               Aug 10 2026  W Phillips  MATURITY / LastPayoffDate added. Maturities
                                        past the payoff date are no longer sized,
